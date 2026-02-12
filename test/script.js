@@ -1,4 +1,5 @@
 import BLEJS from "https://gyverlibs.github.io/BLE.js/ble.min.js";
+// import BLEJS from "../ble";
 
 let i = 0;
 let ble = new BLEJS({ auto_open: true, eol: '' });

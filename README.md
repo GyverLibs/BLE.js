@@ -4,7 +4,9 @@
 - Буферизация отправки
 - Буферизация приёма, разделение текста по разделителю
 
-> npm i @alexgyver/ble
+> **Browser**: https://gyverlibs.github.io/BLE.js/BLE.min.js
+
+> **Node**: npm i @alexgyver/ble
 
 ## Дока
 ```js
