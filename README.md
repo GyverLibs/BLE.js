@@ -4,6 +4,8 @@
 - Буферизация отправки
 - Буферизация приёма, разделение текста по разделителю
 
+[demo](https://gyverlibs.github.io/BLE.js/test/)
+
 > **Browser**: https://gyverlibs.github.io/BLE.js/BLE.min.js
 
 > **Node**: npm i @alexgyver/ble
