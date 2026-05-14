@@ -1,4 +1,4 @@
-import { sleep, ShiftBuffer, StreamSplitter } from "@alexgyver/utils";
+import { sleep, SerialExecutor } from "@alexgyver/utils";
 
 export default class BLEJS {
     static State = {
@@ -8,36 +8,30 @@ export default class BLEJS {
         Closing: 'closing',
     };
 
-    //#region handlers
-    onbin = null;
     ontext = null;
-
+    onbin(b) { }
     onopen() { }
     onclose() { }
     onchange(s) { }
     onselect(name) { }
     onerror(e) { }
 
-    //#region constructor
     constructor(params = {}) {
         const def = {
-            eol: /\r?\n/,
             serviceUUID: '0000ffe0-0000-1000-8000-00805f9b34fb',
-            charxUUID: '0000ffe1-0000-1000-8000-00805f9b34fb',
+            rxUUID: '0000ffe1-0000-1000-8000-00805f9b34fb',
+            txUUID: '0000ffe2-0000-1000-8000-00805f9b34fb',
             auto_open: false,
-            max_tx: 20,
             reconnect: 1000,
+            chunkSize: 500,
+            chunkDelay: 0,
         };
-        this.cfg = { ...def, ...params };
 
-        this.splitter = new StreamSplitter(this.cfg.eol);
-        this.splitter.ontext = (t) => this.ontext(t);
+        this.cfg = { ...def, ...params };
     }
 
-    //#region methods
     config(params = {}) {
         this.cfg = { ...this.cfg, ...params };
-        this.splitter.eol = this.cfg.eol;
     }
 
     static supported() {
@@ -53,119 +47,228 @@ export default class BLEJS {
     }
 
     getName() {
-        return this._device ? this._device.name : null;
+        return this._device ? this._device.name : 'None';
     }
 
     async select() {
         try {
             await this.close();
-            if (this._device) this._device.removeEventListener('gattserverdisconnected', this._disconnect_h);
+
+            if (this._device) {
+                this._device.removeEventListener(
+                    'gattserverdisconnected',
+                    this._disconnect_h
+                );
+            }
+
             this._device = await navigator.bluetooth.requestDevice({
                 filters: [{ services: [this.cfg.serviceUUID] }],
-                optionalServices: [this.cfg.serviceUUID]
+                optionalServices: [this.cfg.serviceUUID],
             });
-            this._device.addEventListener("gattserverdisconnected", this._disconnect_h);
+
+            this._device.addEventListener(
+                'gattserverdisconnected',
+                this._disconnect_h
+            );
         } catch (e) {
             this._error(e);
             this._device = null;
         }
+
         this.onselect(this.getName());
+
         if (this.cfg.auto_open) this.open();
+
         return this.selected();
     }
 
     async open() {
-        if (!this._device) return;
-        if (this.opened()) return;
+        return this._lifecycle.runNothrow(async () => {
+            if (!this._device) {
+                this._error('No device');
+                return false;
+            }
 
-        if (this.cfg.reconnect) this.retry = true;
-        await this._open();
+            if (this.opened()) return true;
+
+            if (this.cfg.reconnect) this.retry = true;
+
+            await this._open();
+
+            return this.opened();
+        });
     }
 
     async _open() {
-        if (this._state != BLEJS.State.Closed) return;
+        if (this._state !== BLEJS.State.Closed) return;
 
         this._change(BLEJS.State.Opening);
+
         try {
             const server = await this._device.gatt.connect();
             const service = await server.getPrimaryService(this.cfg.serviceUUID);
-            this._charx = await service.getCharacteristic(this.cfg.charxUUID);
-            await this._charx.startNotifications();
-            this._charx.addEventListener("characteristicvaluechanged", this._data_h);
-            this._buffer.clear();
+
+            this._rx = await service.getCharacteristic(this.cfg.rxUUID);
+            this._tx = await service.getCharacteristic(this.cfg.txUUID);
+
+            await this._tx.startNotifications();
+            this._tx.addEventListener(
+                'characteristicvaluechanged',
+                this._data_h
+            );
+
+            this._sender.reset();
             this._change(BLEJS.State.Open);
         } catch (e) {
             this._error(e);
+            this._sender.reset();
             this._change(BLEJS.State.Closed);
-            if (this.retry) sleep(this.cfg.reconnect).then(() => this._open());
+
+            if (this.retry) {
+                sleep(this.cfg.reconnect).then(() => {
+                    this._lifecycle.runNothrow(() => this._open());
+                });
+            }
         }
     }
 
     async close() {
-        this.retry = false;
-        if (this.opened()) await this._close();
+        return this._lifecycle.runNothrow(async () => {
+            this.retry = false;
+            this._sender.reset();
+
+            if (this._state !== BLEJS.State.Closed) {
+                await this._close();
+            }
+
+            return true;
+        });
     }
 
     async _close() {
+        if (this._state === BLEJS.State.Closed) return;
+
         this._change(BLEJS.State.Closing);
-        try { this._device.gatt.disconnect(); }
-        catch (e) { this._error(e); }
+
+        try {
+            if (this._device?.gatt?.connected) {
+                this._device.gatt.disconnect();
+            } else {
+                await this._disconnect();
+            }
+        } catch (e) {
+            this._error(e);
+            await this._disconnect();
+        }
     }
 
-    async sendText(text) {
-        await this.sendBin((new TextEncoder()).encode(text));
+    async sendText(text, fast = true) {
+        await this.sendBin((new TextEncoder()).encode(text), fast);
     }
 
-    async sendBin(data) {
-        this._buffer.push(data);
-        this._send();
+    async sendBin(data, fast = true) {
+        if (!this.opened() || !this._rx) return false;
+
+        return this._sender.runNothrow(async () => {
+            if (!this.opened() || !this._rx) return false;
+
+            const chunkSize = this.cfg.chunkSize;
+            const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+
+            for (let i = 0; i < bytes.length; i += chunkSize) {
+                if (!this.opened() || !this._rx) return false;
+
+                const chunk = bytes.slice(i, i + chunkSize);
+
+                if (fast) {
+                    await this._rx.writeValueWithoutResponse(chunk);
+                } else {
+                    await this._rx.writeValueWithResponse(chunk);
+                }
+
+                if (this.cfg.chunkDelay > 0) {
+                    await sleep(this.cfg.chunkDelay);
+                }
+            }
+
+            return true;
+        });
     }
 
-    //#region private    
-    _device = null;
-    _charx = null;
     _state = BLEJS.State.Closed;
-    _buffer = new ShiftBuffer();
-    _decoder = new TextDecoder();
+    _device = null;
+    _rx = null;
+    _tx = null;
+
+    retry = false;
+
+    _sender = new SerialExecutor();
+    _lifecycle = new SerialExecutor();
 
     async _disconnect(e) {
+        this._sender.reset();
+
+        if (this._tx) {
+            try {
+                this._tx.removeEventListener(
+                    'characteristicvaluechanged',
+                    this._data_h
+                );
+            } catch (e) { }
+        }
+
+        this._rx = null;
+        this._tx = null;
+
         this._change(BLEJS.State.Closed);
-        if (this._charx) this._charx.removeEventListener('characteristicvaluechanged', this._data_h);
-        this._charx = null;
-        if (this.retry) sleep(this.cfg.reconnect).then(() => this._open());
+
+        if (this.retry) {
+            sleep(this.cfg.reconnect).then(() => {
+                this._lifecycle.runNothrow(() => this._open());
+            });
+        }
+
         await sleep(50);
     }
+
     _disconnect_h = this._disconnect.bind(this);
 
     _data(e) {
-        const dv = e.target.value;
-        const value = new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength);
-        if (this.onbin) this.onbin(value);
-        if (this.ontext) this.splitter.write(this._decoder.decode(value, { stream: true }));
-    }
-    _data_h = this._data.bind(this);
+        try {
+            const dv = e.target.value;
+            const value = new Uint8Array(
+                dv.buffer,
+                dv.byteOffset,
+                dv.byteLength
+            );
 
-    async _send() {
-        if (this._busy) return;
-        this._busy = true;
-        while (this._buffer.length && this._charx) {
-            let d = this._buffer.shift(this.cfg.max_tx);
-            try {
-                if (d.length) await this._charx.writeValueWithoutResponse(d);
-            } catch (e) { }
+            this.onbin(value);
+            if (this.ontext) this.ontext(new TextDecoder().decode(value));
+        } catch (e) {
+            this._error(e);
         }
-        this._busy = false;
     }
+
+    _data_h = this._data.bind(this);
 
     _error(e) {
         this.onerror('[BLE] ' + e);
     }
+
     _change(s) {
+        if (this._state === s) return;
+
         this._state = s;
         this.onchange(s);
+
         switch (s) {
-            case BLEJS.State.Open: this.onopen(); break;
-            case BLEJS.State.Closed: this.onclose(); break;
+            case BLEJS.State.Open:
+                this.onopen();
+                break;
+
+            case BLEJS.State.Closed:
+                this.onclose();
+                break;
         }
     }
 }

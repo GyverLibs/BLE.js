@@ -1,5 +1,5 @@
 import BLEJS from "https://gyverlibs.github.io/BLE.js/ble.min.js";
-// import BLEJS from "../ble2light.js";
+// import BLEJS from "../ble.js";
 
 let i = 0;
 let ble = new BLEJS({ auto_open: true });
@@ -8,14 +8,15 @@ let ble = new BLEJS({ auto_open: true });
 select_b.onclick = () => ble.select();
 open_b.onclick = () => ble.open();
 close_b.onclick = () => ble.close();
+
 send_b.onclick = async () => {
     ble.sendBin(new TextEncoder().encode('Hello ' + i++));
 }
 
-async function send(hex) {
-    const data = new Uint8Array(hex.trim().split(/\s+/).map(x => parseInt(x, 16)));
-    await ble.sendBin(data);
-}
+// async function send(hex) {
+//     const data = new Uint8Array(hex.trim().split(/\s+/).map(x => parseInt(x, 16)));
+//     await ble.sendBin(data);
+// }
 
 // read
 ble.onbin = b => console.log(new TextDecoder().decode(b));
