@@ -163,36 +163,51 @@ export default class BLEJS {
     }
 
     async sendText(text, fast = true) {
-        await this.sendBin((new TextEncoder()).encode(text), fast);
+        return this.sendBin((new TextEncoder()).encode(text), fast);
     }
 
-    async sendBin(data, fast = true) {
+    async sendFrame(data, fast = true) {
+        return this.sendBin(data, fast, 0);
+    }
+
+    async sendBin(data, fast = true, chunkSize = this.cfg.chunkSize) {
         if (!this.opened() || !this._rx) return false;
 
-        return this._sender.runNothrow(async () => {
+        const result = await this._sender.runNothrow(async () => {
             if (!this.opened() || !this._rx) return false;
 
-            const chunkSize = this.cfg.chunkSize;
             const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+            if (!bytes.length) return true;
 
-            for (let i = 0; i < bytes.length; i += chunkSize) {
-                if (!this.opened() || !this._rx) return false;
+            let size = Number(chunkSize);
+            if (!Number.isFinite(size) || size <= 0) size = bytes.length;
+            else size = Math.max(1, Math.floor(size));
 
-                const chunk = bytes.slice(i, i + chunkSize);
+            try {
+                for (let i = 0; i < bytes.length; i += size) {
+                    if (!this.opened() || !this._rx) return false;
 
-                if (fast) {
-                    await this._rx.writeValueWithoutResponse(chunk);
-                } else {
-                    await this._rx.writeValueWithResponse(chunk);
+                    const chunk = bytes.subarray(i, i + size);
+
+                    if (fast) {
+                        await this._rx.writeValueWithoutResponse(chunk);
+                    } else {
+                        await this._rx.writeValueWithResponse(chunk);
+                    }
+
+                    if (i + size < bytes.length && this.cfg.chunkDelay > 0) {
+                        await sleep(this.cfg.chunkDelay);
+                    }
                 }
-
-                if (this.cfg.chunkDelay > 0) {
-                    await sleep(this.cfg.chunkDelay);
-                }
+            } catch (e) {
+                this._error(e);
+                return false;
             }
 
             return true;
         });
+
+        return result === true;
     }
 
     _state = BLEJS.State.Closed;
