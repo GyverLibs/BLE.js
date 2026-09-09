@@ -1,6 +1,6 @@
 {
   "name": "@alexgyver/ble",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Web BLE Serial",
   "main": "./ble.js",
   "module": "./ble.js",
@@ -16,7 +16,7 @@
   "devDependencies": {
     "css-loader": "^7.1.5",
     "style-loader": "^4.0.0",
-    "webpack": "^5.110.2",
+    "webpack": "^5.110.3",
     "webpack-cli": "^7.2.3",
     "webpack-dev-server": "^6.0.0"
   },

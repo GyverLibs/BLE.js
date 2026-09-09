@@ -22,6 +22,7 @@ config(params = {});
 // reconnect: 1000
 // chunkSize: 500
 // chunkDelay: 0
+// withResponse: false
 
 onbin(b);
 ontext(t);
@@ -36,14 +37,18 @@ static supported();
 opened();
 selected();
 getName();
+getRxProperties();
+getTxProperties();
+canWriteWithResponse();
+canWriteWithoutResponse();
+canIndicate();
 
 select();
 open();
 close();
 
-sendBin(data, fast = true, chunkSize = config.chunkSize);
-sendFrame(data, fast = true);
-sendText(text, fast = true);
+sendBin(data, options = {});
+sendText(text, options = {});
 ```
 
 Все методы отправки возвращают `Promise<boolean>`.
@@ -64,18 +69,44 @@ await ble.sendBin(data);
 `chunkSize <= 0` отключает дробление и выполняет одну characteristic write:
 
 ```js
-await ble.sendBin(data, true, 0);
+await ble.sendBin(data, { chunkSize: 0 });
 ```
 
-Для протоколов, где одна BLE write является одним транспортным frame, следует использовать `sendFrame()`:
+Для протоколов, где одна BLE write является одним транспортным frame, отключите дробление для конкретной отправки:
 
 ```js
-const ok = await ble.sendFrame(frame);
+const ok = await ble.sendBin(frame, { chunkSize: 0 });
 ```
 
-`sendFrame()` никогда не делит данные. Если characteristic или устройство не принимает запись такого размера, метод вызовет `onerror` и вернёт `false`.
+Опция `withResponse` едина для всех методов отправки:
 
-Параметр `fast` выбирает способ записи:
+```js
+await ble.sendBin(data, { withResponse: true });
+await ble.sendText('hello', { withResponse: true });
+```
 
-- `true` — `writeValueWithoutResponse`
-- `false` — `writeValueWithResponse`
+Для атомарного фрейма с GATT response обе опции можно совместить:
+
+```js
+await ble.sendBin(frame, { withResponse: true, chunkSize: 0 });
+```
+
+При `withResponse: true` используется `writeValueWithResponse()`. Promise отправки завершается после ответа GATT-сервера, поэтому режим подходит для последовательной передачи с транспортным backpressure. Значение по умолчанию задаётся одноимённой настройкой конструктора.
+
+Для обратной совместимости второй boolean-аргумент продолжает трактоваться как старый `fast`: `true` выбирает Write without Response, `false` — Write with Response. Третий аргумент старой формы задаёт `chunkSize`:
+
+```js
+await ble.sendBin(data, false, 100);
+```
+
+Перед использованием можно проверить свойства найденных характеристик:
+
+```js
+if (!ble.canWriteWithResponse()) throw new Error('Write with Response is unavailable');
+if (!ble.canWriteWithoutResponse()) throw new Error('Write without Response is unavailable');
+if (!ble.canIndicate()) throw new Error('Indications are unavailable');
+```
+
+`getRxProperties()` и `getTxProperties()` возвращают объект `BluetoothCharacteristicProperties` либо `null`, пока соединение не открыто. `startNotifications()` включает доступный режим, но не позволяет JavaScript принудительно выбрать Indication вместо Notification. Если протоколу нужны именно Indication, TX characteristic на устройстве следует объявлять как indicate-only.
+
+Проверка поддержки выбранного способа записи выполняется внутри `sendBin()`. При несовместимой RX characteristic метод вызывает `onerror` и возвращает `false`.

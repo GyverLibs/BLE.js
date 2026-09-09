@@ -25,6 +25,7 @@ export default class BLEJS {
             reconnect: 1000,
             chunkSize: 500,
             chunkDelay: 0,
+            withResponse: false,
         };
 
         this.cfg = { ...def, ...params };
@@ -48,6 +49,26 @@ export default class BLEJS {
 
     getName() {
         return this._device ? this._device.name : 'None';
+    }
+
+    getRxProperties() {
+        return this._rx?.properties ?? null;
+    }
+
+    getTxProperties() {
+        return this._tx?.properties ?? null;
+    }
+
+    canWriteWithResponse() {
+        return !!this._rx?.properties?.write;
+    }
+
+    canWriteWithoutResponse() {
+        return !!this._rx?.properties?.writeWithoutResponse;
+    }
+
+    canIndicate() {
+        return !!this._tx?.properties?.indicate;
     }
 
     async select() {
@@ -162,16 +183,14 @@ export default class BLEJS {
         }
     }
 
-    async sendText(text, fast = true) {
-        return this.sendBin((new TextEncoder()).encode(text), fast);
+    async sendText(text, options) {
+        return this.sendBin((new TextEncoder()).encode(text), options);
     }
 
-    async sendFrame(data, fast = true) {
-        return this.sendBin(data, fast, 0);
-    }
-
-    async sendBin(data, fast = true, chunkSize = this.cfg.chunkSize) {
+    async sendBin(data, options, legacyChunkSize) {
         if (!this.opened() || !this._rx) return false;
+
+        options = this._sendOptions(options, legacyChunkSize);
 
         const result = await this._sender.runNothrow(async () => {
             if (!this.opened() || !this._rx) return false;
@@ -179,7 +198,17 @@ export default class BLEJS {
             const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
             if (!bytes.length) return true;
 
-            let size = Number(chunkSize);
+            if (options.withResponse) {
+                if (!this.canWriteWithResponse()) {
+                    this._error('RX characteristic does not support Write with Response');
+                    return false;
+                }
+            } else if (!this.canWriteWithoutResponse()) {
+                this._error('RX characteristic does not support Write without Response');
+                return false;
+            }
+
+            let size = Number(options.chunkSize);
             if (!Number.isFinite(size) || size <= 0) size = bytes.length;
             else size = Math.max(1, Math.floor(size));
 
@@ -189,10 +218,10 @@ export default class BLEJS {
 
                     const chunk = bytes.subarray(i, i + size);
 
-                    if (fast) {
-                        await this._rx.writeValueWithoutResponse(chunk);
-                    } else {
+                    if (options.withResponse) {
                         await this._rx.writeValueWithResponse(chunk);
+                    } else {
+                        await this._rx.writeValueWithoutResponse(chunk);
                     }
 
                     if (i + size < bytes.length && this.cfg.chunkDelay > 0) {
@@ -208,6 +237,20 @@ export default class BLEJS {
         });
 
         return result === true;
+    }
+
+    _sendOptions(options, legacyChunkSize) {
+        if (typeof options === 'boolean') {
+            return {
+                withResponse: !options,
+                chunkSize: legacyChunkSize ?? this.cfg.chunkSize,
+            };
+        }
+
+        return {
+            withResponse: options?.withResponse ?? this.cfg.withResponse,
+            chunkSize: options?.chunkSize ?? this.cfg.chunkSize,
+        };
     }
 
     _state = BLEJS.State.Closed;
